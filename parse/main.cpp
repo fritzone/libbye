@@ -13,10 +13,12 @@
 #include "colors.h"
 #include "inja/template.hpp"
 #include "nlohmann/json_fwd.hpp"
+#include <filesystem>
 
 #include <boost/program_options.hpp>
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/split.hpp>
+#include <boost/filesystem.hpp>
 
 using namespace inja;
 using json = nlohmann::json;
@@ -251,8 +253,9 @@ int main(int argc, char *argv[])
         ("library", po::value<std::string>(), "the compiled library")
         ("libname", po::value<std::string>(), "the name of the library")
         ("compilationdb", po::value<std::string>(), "the compilation library")
-        ("proxy_header", po::value<std::string>(), "the location where the header template is read from")
-        ("target_dir", po::value<std::string>(), "the location where the generated header will be written to")
+        ("proxy_header", po::value<std::string>(), "the location where the header template for the proxy class is read from")
+        ("proxy_source", po::value<std::string>(), "the location where the source template for the proxy class is read from")
+        ("target_dir", po::value<std::string>(), "the location where the generated proxy header and source files will be written to")
     ;
 
     po::variables_map vm;
@@ -304,9 +307,24 @@ int main(int argc, char *argv[])
         std::cout << desc;
         return 1;
     }
+
     if(vm.count("proxy_header") != 1)
     {
         std::cerr << "Missing the location of the proxy header template (--proxy_header)" << std::endl;
+        std::cout << desc;
+        return 1;
+    }
+
+    if(vm.count("proxy_source") != 1)
+    {
+        std::cerr << "Missing the location of the proxy source template (--proxy_souirce)" << std::endl;
+        std::cout << desc;
+        return 1;
+    }
+
+    if(vm.count("target_dir") != 1)
+    {
+        std::cerr << "Missing the location of the target directory (--target_dir)" << std::endl;
         std::cout << desc;
         return 1;
     }
@@ -315,6 +333,8 @@ int main(int argc, char *argv[])
     funs = list_functions(vm.at("library").as<std::string>().c_str());
     auto compile_db = vm["compilationdb"].as<std::string>();
     std::string header_location = vm["proxy_header"].as<std::string>();
+    std::string source_location = vm["proxy_source"].as<std::string>();
+    std::string target_dir = vm["target_dir"].as<std::string>();
 
     for(const auto& input_file : input_files)
     {
@@ -330,17 +350,6 @@ int main(int argc, char *argv[])
             {
                 continue;
             }
-
-//            const char *cmdLineArgs[] = { "-I/usr/include/c++/11",
-//                "-I/usr/include/c++/11/bits",
-//                "-I /usr/include/x86_64-linux-gnu/c++/11/bits/",
-//                "-I/usr/include/x86_64-linux-gnu/c++/11/",
-//                "-I/usr/lib/llvm-14/include/c++/v1/",
-//                "-fPIC",
-//                "-std=gnu++17",
-//                "-MD"
-//            };
-
 
             std::string scmdline = (*it)["command"];
             std::vector<std::string> words;
@@ -384,7 +393,8 @@ int main(int argc, char *argv[])
             CXErrorCode ec = clang_parseTranslationUnit2(
                 index,
                 fn.c_str(),
-                cstrings.data(), cstrings.size(),
+                cstrings.data(),
+                cstrings.size(),
                 nullptr,
                 0,
                 CXTranslationUnit_KeepGoing,
@@ -413,7 +423,6 @@ int main(int argc, char *argv[])
         }
     }
 
-    // TODO: render the header file
 
     nlohmann::json j;
 
@@ -434,12 +443,30 @@ int main(int argc, char *argv[])
 
     j["libname"] = libname;
 
+    // render the header file
     Environment env;
-    Template temp = env.parse_template(header_location);
-    std::string result = env.render(temp, j);
+    Template header_temp = env.parse_template(header_location);
+    std::string header_result = env.render(header_temp, j);
 
-    std::cout << result << std::endl;
+    // create the directory
+    boost::filesystem::path dir(target_dir);
+    if(boost::filesystem::create_directories(dir))
+    {
+        std::cout<< "Directory Created: " << target_dir <<std::endl;
+    }
 
-    // TODO: render the CPP file
+    // write the header file
+    std::string h_dir = target_dir + "/" + libname +"_proxy_header.h";
+    std::cout << h_dir << std::endl;
+    std::ofstream h_out(h_dir, std::ios::out | std::ios::in | std::ios::trunc);
+    h_out << header_result;
 
+    // render the CPP file
+    Template source_temp = env.parse_template(source_location);
+    std::string source_result = env.render(source_temp, j);
+
+    std::string s_dir = target_dir + "/" + libname + "_proxy_source.cpp";
+    std::cout << s_dir << std::endl;
+    std::ofstream s_out(s_dir, std::ios::out | std::ios::in | std::ios::trunc);
+    s_out << source_result;
 }

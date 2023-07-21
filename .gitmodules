@@ -1,6 +1,3 @@
 [submodule "ext/inja"]
 	path = ext/inja
 	url = https://github.com/pantor/inja.git
-[submodule "ext/embed-resource"]
-	path = ext/embed-resource
-	url = https://github.com/cyrilcode/embed-resource.git
