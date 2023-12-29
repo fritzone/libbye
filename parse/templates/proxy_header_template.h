@@ -6,6 +6,11 @@
 
 #include <iostream>
 
+// forward declaration of classes and structs
+## for fwd in forwards
+    {{ fwd.type }} {{ fwd.name }};
+## endfor
+
 class {{libname}}_proxy
 {
 
@@ -25,10 +30,16 @@ public:
 ## endfor
     }
 
+## for function in functions
+
+    // {{ function.name }}, {{ function.filename }}:{{ function.line }}
+    {{ function.return_type }} {{ function.name }} ( {{ function.parameters }} );
+## endfor
+
     /**
      * Will load the given proxy library from the resource embedded in the application
      **/
-    std::shared_ptr<{{libname}}_proxy> load();
+    static std::shared_ptr<{{libname}}_proxy> load();
 
 private:
 

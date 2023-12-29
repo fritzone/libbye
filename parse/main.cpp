@@ -19,6 +19,8 @@
 #include <boost/algorithm/string/classification.hpp>
 #include <boost/algorithm/string/split.hpp>
 #include <boost/filesystem.hpp>
+#include <boost/algorithm/string.hpp>
+
 
 using namespace inja;
 using json = nlohmann::json;
@@ -29,14 +31,27 @@ struct function_decl
     std::string return_type;
     std::string name;
     std::vector<std::string> parameters;
+    std::vector<std::string> parameter_names;
     std::string mangled_name;
     std::string filename;
     int linenumber;
 };
 
-std::string fn  = "";           // the filename
-std::vector<std::string> funs;  // the functions as loaded by libelf
-std::vector<function_decl> declarations;    // these will be worked on in the end
+// a structure declaration (struct or class)
+struct struct_declaration
+{
+    std::string type;       // struct or class
+    std::string name;       // the name of the struct
+    std::string headerfile; // the headerfile in which it is declared
+};
+
+namespace
+{
+std::string fn  = "";                                   // the filename
+std::vector<std::string> funs;                          // the functions as loaded by libelf
+std::vector<struct_declaration> forward_declarations;   // forward declarations for proxy classes of classes that will be needed in case some header declares a class
+std::vector<function_decl> declarations;                // these will be worked on in the end
+}
 
 template <typename T>
 std::string join(const T& v, const std::string& delim)
@@ -90,18 +105,21 @@ function_decl resolve_function_declaration(CXCursor cursor, const std::string& f
     }
 
     int num_args = clang_Cursor_getNumArguments(cursor);
-    std::vector<std::string> f_args;
+    int arg_ctr = 0;
+    std::vector<std::string> f_args, nm_args;
     for (int i = 0; i < num_args; ++i)
     {
         auto arg_cursor = clang_Cursor_getArgument(cursor, i);
         auto arg_name = to_string(clang_getCursorSpelling(arg_cursor));
         if (arg_name.empty())
         {
-            arg_name = "no name!";
+            arg_name = "arg_" + std::to_string(++arg_ctr);
         }
 
         auto arg_data_type = to_string(clang_getTypeSpelling(clang_getArgType(type, i)));
+
         f_args.push_back(arg_data_type);
+        nm_args.push_back(arg_name);
     }
 
     auto it = std::find_if(funs.begin(), funs.end(), [function_name](const std::string& n) -> bool {
@@ -119,7 +137,7 @@ function_decl resolve_function_declaration(CXCursor cursor, const std::string& f
         mangled = *it;
     }
 
-    return {return_type, function_name, f_args, mangled, file, line};
+    return {return_type, function_name, f_args, nm_args, mangled, file, line};
 }
 
 void print_diagnostics(CXTranslationUnit translationUnit)
@@ -156,14 +174,17 @@ std::ostream& operator<<(std::ostream& stream, const CXString& str)
 auto ClangVisitor = [](CXCursor cursor, CXCursor parent, CXClientData client_data) -> CXChildVisitResult
 {
     auto kind = clang_getCursorKindSpelling(clang_getCursorKind(cursor));
-    if (clang_getCursorKind(cursor) == CXCursor_FunctionDecl)
+    auto ck = clang_getCursorKind(cursor);
+
+    auto d = clang_getCursorLocation(cursor);
+    CXFile file;
+    unsigned line;
+    unsigned column;
+    unsigned offset;
+    clang_getSpellingLocation(d, &file, &line, &column, &offset);
+
+    if (CXCursor_FunctionDecl == ck)
     {
-        auto d = clang_getCursorLocation(cursor);
-        CXFile file;
-        unsigned line;
-        unsigned column;
-        unsigned offset;
-        clang_getSpellingLocation(d, &file, &line, &column, &offset);
         if(to_string(clang_File_tryGetRealPathName(file)) == fn)
         {
             function_decl fdc = resolve_function_declaration(cursor, to_string(clang_getFileName(file)), line);
@@ -173,6 +194,29 @@ auto ClangVisitor = [](CXCursor cursor, CXCursor parent, CXClientData client_dat
             }
         }
     }
+
+    if(CXCursor_ClassDecl == ck)
+    {
+        if(to_string(clang_File_tryGetRealPathName(file)) == fn)
+        {
+            auto cs = clang_getCursorSpelling(cursor);
+            auto name = to_string(cs);
+
+            forward_declarations.push_back({"class", name});
+        }
+    }
+
+    if(CXCursor_StructDecl == ck)
+    {
+        if(to_string(clang_File_tryGetRealPathName(file)) == fn)
+        {
+            auto cs = clang_getCursorSpelling(cursor);
+            auto name = to_string(cs);
+
+            forward_declarations.push_back({"struct", name, fn});
+        }
+    }
+
     return CXChildVisit_Recurse;
 };
 
@@ -247,7 +291,7 @@ int main(int argc, char *argv[])
 
     namespace po = boost::program_options;
 
-    po::options_description desc("libby (c) 2023 fritzone.\n\nUsage");
+    po::options_description desc("libby-parser (c) 2023 fritzone.\n\nUsage");
     desc.add_options()
         ("help", "produce this help message")
         ("library", po::value<std::string>(), "the compiled library")
@@ -428,6 +472,8 @@ int main(int argc, char *argv[])
 
     j["functions"] = {};
 
+    // format the parameters for calling the function pointer
+
     for(const auto& d : declarations)
     {
         nlohmann::json j_f;
@@ -435,13 +481,43 @@ int main(int argc, char *argv[])
         j_f["mangled"] = d.mangled_name;
         j_f["return_type"] = d.return_type;
         j_f["parameters"] = join(d.parameters, ",");
+        j_f["call"] = join(d.parameter_names, ",");
         j_f["filename"] = d.filename;
         j_f["line"] = d.linenumber;
+
+        if(d.parameters.size() != d.parameter_names.size())
+        {
+            std::cerr << "Some error in function declaration " << d.name << std::endl;
+            return 1;
+        }
+
+        std::string f_def = "";
+        for(size_t i=0; i<d.parameters.size(); i++)
+        {
+            f_def = f_def + d.parameters.at(i) + " " + d.parameter_names.at(i);
+            if(i < d.parameters.size() - 1)
+            {
+                f_def += ", ";
+            }
+        }
+        j_f["fundef"] = f_def;
+
 
         j["functions"].push_back(j_f);
     }
 
     j["libname"] = libname;
+
+    j["forwards"] = {};
+    for(const auto&[t,n,h] : forward_declarations)
+    {
+        nlohmann::json j_fd;
+        j_fd["name"] = n;
+        j_fd["type"] = t;
+        j_fd["header"] = h;
+
+        j["forwards"].push_back(j_fd);
+    }
 
     // render the header file
     Environment env;

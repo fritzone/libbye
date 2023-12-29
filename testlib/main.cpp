@@ -1,7 +1,9 @@
 #include <string>
+#include <iostream>
 
 int examplefunc()
 {
+    std::cout << "examplefunc from library" << std::endl;
     return 42;
 }
 
